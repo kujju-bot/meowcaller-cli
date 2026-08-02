@@ -241,7 +241,22 @@ async function main() {
       
       // Wait for pairing to complete (full login)
       console.log('Waiting for pairing to complete...');
-      await wa.waitForConnectionUpdate(({ connection }) => connection === 'open' && wa.user?.id);
+      // The connection will restart after pairing (error 515), so we need to wait through it
+      let paired = false;
+      while (!paired) {
+        try {
+          await wa.waitForConnectionUpdate(({ connection }) => connection === 'open' && wa.user?.id, 30000);
+          paired = true;
+        } catch (err) {
+          if (err.message.includes('Connection Failure') || err.message.includes('515')) {
+            // Connection restart after pairing - continue waiting
+            console.log('Connection restarting after pairing, waiting...');
+            await new Promise(r => setTimeout(r, 2000));
+            continue;
+          }
+          throw err;
+        }
+      }
       console.log('✅ Successfully paired! User ID:', wa.user.id);
     } catch (err) {
       console.error('Failed to request pairing code:', err.message);
