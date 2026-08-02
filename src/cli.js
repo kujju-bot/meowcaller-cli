@@ -11,13 +11,19 @@ const logger = pino({ level: 'info' });
 
 function printUsage() {
   console.log(`
-Usage: meowcaller-cli <phone> "message"
+Usage: meowcaller-cli <phone> "message" [--pair-code]
 
 Makes a WhatsApp call to <phone> and plays the message as TTS audio,
 then hangs up after 3 seconds. Records the call by default.
 
-Example:
+Options:
+  --pair-code    Use phone number pairing instead of QR code
+
+Example (QR code):
   meowcaller-cli +919876543210 "Hello, this is a test message"
+
+Example (phone pairing):
+  meowcaller-cli +919876543210 "Hello, this is a test message" --pair-code
 
 The phone number must include country code (e.g., +91 for India).
 `);
@@ -39,7 +45,10 @@ function parseArgs() {
     process.exit(1);
   }
   
-  return { phone, message };
+  // Check for --pair-code flag
+  const usePairCode = args.includes('--pair-code');
+  
+  return { phone, message, usePairCode };
 }
 
 async function textToSpeechBuffer(text) {
@@ -174,11 +183,14 @@ class WAVRecorder {
 }
 
 async function main() {
-  const { phone, message } = parseArgs();
+  const { phone, message, usePairCode } = parseArgs();
   
   console.log(`Starting meowcaller-cli...`);
   console.log(`Target: ${phone}`);
   console.log(`Message: "${message}"`);
+  if (usePairCode) {
+    console.log(`Using phone number pairing...`);
+  }
   
   const { state, saveCreds } = await useMultiFileAuthState('auth_info');
   
@@ -191,6 +203,22 @@ async function main() {
   meow.connect();
   
   wa.ev.on('creds.update', saveCreds);
+  
+  // If using pair code, request it
+  if (usePairCode) {
+    const cleanPhone = phone.replace('+', '');
+    console.log(`Requesting pairing code for ${cleanPhone}...`);
+    try {
+      const code = await wa.requestPairingCode(cleanPhone);
+      console.log('\n=== PAIRING CODE ===');
+      console.log(`Your pairing code: ${code}`);
+      console.log('Enter this code in WhatsApp: Settings → Linked Devices → Link a Device → "Link with phone number"');
+      console.log('=== END PAIRING CODE ===\n');
+    } catch (err) {
+      console.error('Failed to request pairing code:', err.message);
+      process.exit(1);
+    }
+  }
   
   // Wait for connection
   let qrPrinted = false;
@@ -222,7 +250,8 @@ async function main() {
     startTimeout();
     
     const handleConnectionUpdate = async ({ connection, lastDisconnect, qr }) => {
-      if (qr && !qrPrinted) {
+      // Only show QR if not using pair code
+      if (qr && !qrPrinted && !usePairCode) {
         qrPrinted = true;
         console.log('\n=== SCAN THIS QR CODE WITH WHATSAPP ===');
         console.log('Settings → Linked Devices → Link a Device');
