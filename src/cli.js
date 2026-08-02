@@ -1,10 +1,11 @@
 #!/usr/bin/env node
 
 import { makeWASocket, useMultiFileAuthState, DisconnectReason } from '@whiskeysockets/baileys';
-import { Client, SourceFunc, FrameSamples, SampleRate } from 'meowcaller-js';
+import { Client, SourceFunc, SinkFunc, FrameSamples, SampleRate } from 'meowcaller-js';
 import pino from 'pino';
 import { spawn } from 'node:child_process';
-import { Readable } from 'node:stream';
+import { createWriteStream, createReadStream } from 'node:fs';
+import { pipeline } from 'node:stream/promises';
 
 const logger = pino({ level: 'info' });
 
@@ -13,7 +14,7 @@ function printUsage() {
 Usage: meowcaller-cli <phone> "message"
 
 Makes a WhatsApp call to <phone> and plays the message as TTS audio,
-then hangs up after 3 seconds.
+then hangs up after 3 seconds. Records the call by default.
 
 Example:
   meowcaller-cli +919876543210 "Hello, this is a test message"
@@ -42,7 +43,6 @@ function parseArgs() {
 }
 
 async function textToSpeechBuffer(text) {
-  // Try espeak first (Linux), then say (macOS)
   const ttsCommands = [
     ['espeak', '-w', '/dev/stdout', '--stdout', text],
     ['say', '-o', '/dev/stdout', '--data-format=LEF32@16000', text],
@@ -68,7 +68,7 @@ function runTTS(cmd, args) {
     const chunks = [];
     
     proc.stdout.on('data', (chunk) => chunks.push(chunk));
-    proc.stderr.on('data', () => {}); // ignore stderr
+    proc.stderr.on('data', () => {});
     
     proc.on('close', (code) => {
       if (code === 0 && chunks.length > 0) {
@@ -84,10 +84,9 @@ function runTTS(cmd, args) {
   });
 }
 
-// Convert PCM buffer to Float32Array frames
 function pcmToFrames(buffer) {
   const frames = [];
-  const bytesPerFrame = FrameSamples * 2; // 16-bit = 2 bytes per sample
+  const bytesPerFrame = FrameSamples * 2;
   
   for (let offset = 0; offset < buffer.length; offset += bytesPerFrame) {
     const chunk = buffer.subarray(offset, offset + bytesPerFrame);
@@ -100,7 +99,6 @@ function pcmToFrames(buffer) {
       frame[i] = chunk.readInt16LE(i * 2) / 32768;
     }
     
-    // Pad with silence if needed
     for (let i = actualSamples; i < FrameSamples; i++) {
       frame[i] = 0;
     }
@@ -109,6 +107,70 @@ function pcmToFrames(buffer) {
   }
   
   return frames;
+}
+
+// WAV file writer for recording
+class WAVRecorder {
+  constructor(filename, sampleRate = SampleRate, channels = 1) {
+    this.filename = filename;
+    this.sampleRate = sampleRate;
+    this.channels = channels;
+    this.frames = [];
+    this.dataLength = 0;
+    this.started = false;
+  }
+  
+  writeFrame(frame) {
+    // Convert Float32Array to 16-bit PCM
+    const pcmBuffer = Buffer.alloc(frame.length * 2);
+    for (let i = 0; i < frame.length; i++) {
+      const sample = Math.max(-1, Math.min(1, frame[i]));
+      pcmBuffer.writeInt16LE(Math.round(sample * 32767), i * 2);
+    }
+    this.frames.push(pcmBuffer);
+    this.dataLength += pcmBuffer.length;
+  }
+  
+  async save() {
+    const wavHeader = this.createWAVHeader(this.dataLength);
+    const dataBuffer = Buffer.concat(this.frames);
+    const fullBuffer = Buffer.concat([wavHeader, dataBuffer]);
+    
+    const { writeFile } = await import('node:fs/promises');
+    await writeFile(this.filename, fullBuffer);
+    console.log(`Recording saved to: ${this.filename}`);
+    return this.filename;
+  }
+  
+  createWAVHeader(dataLength) {
+    const header = Buffer.alloc(44);
+    const sampleRate = this.sampleRate;
+    const channels = this.channels;
+    const bitsPerSample = 16;
+    const byteRate = sampleRate * channels * bitsPerSample / 8;
+    const blockAlign = channels * bitsPerSample / 8;
+    
+    // RIFF header
+    header.write('RIFF', 0);
+    header.writeUInt32LE(36 + dataLength, 4);
+    header.write('WAVE', 8);
+    
+    // fmt chunk
+    header.write('fmt ', 12);
+    header.writeUInt32LE(16, 16);
+    header.writeUInt16LE(1, 20); // PCM format
+    header.writeUInt16LE(channels, 22);
+    header.writeUInt32LE(sampleRate, 24);
+    header.writeUInt32LE(byteRate, 28);
+    header.writeUInt16LE(blockAlign, 32);
+    header.writeUInt16LE(bitsPerSample, 34);
+    
+    // data chunk
+    header.write('data', 36);
+    header.writeUInt32LE(dataLength, 40);
+    
+    return header;
+  }
 }
 
 async function main() {
@@ -121,16 +183,16 @@ async function main() {
   const { state, saveCreds } = await useMultiFileAuthState('auth_info');
   
   const wa = makeWASocket({
-      auth: state,
-      logger,
-    });
-
-    const meow = new Client(wa, { logger });
-    meow.connect();
-
-    wa.ev.on('creds.update', saveCreds);
-
-    // Wait for connection
+    auth: state,
+    logger,
+  });
+  
+  const meow = new Client(wa, { logger });
+  meow.connect();
+  
+  wa.ev.on('creds.update', saveCreds);
+  
+  // Wait for connection
   let qrPrinted = false;
   await new Promise((resolve) => {
     const checkConnection = setInterval(() => {
@@ -140,7 +202,6 @@ async function main() {
       }
     }, 500);
     
-    // Handle QR in connection.update event
     const handleConnectionUpdate = async ({ connection, lastDisconnect, qr }) => {
       if (qr && !qrPrinted) {
         qrPrinted = true;
@@ -171,6 +232,17 @@ async function main() {
   try {
     const call = await meow.call({}, phone);
     
+    // Set up recording
+    const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
+    const safePhone = phone.replace('+', '').replace(/\s+/g, '');
+    const recordingFile = `recordings/call_${safePhone}_${timestamp}.wav`;
+    
+    // Ensure recordings directory exists
+    const { mkdir } = await import('node:fs/promises');
+    await mkdir('recordings', { recursive: true });
+    
+    const recorder = new WAVRecorder(recordingFile);
+    
     call.onReady(async () => {
       console.log('Call connected! Playing message...');
       
@@ -188,10 +260,16 @@ async function main() {
         
         const source = SourceFunc(async () => {
           if (frameIndex >= frames.length) {
-            return null; // End of stream
+            return null;
           }
           return frames[frameIndex++];
         });
+        
+        // Set up recording sink for incoming audio
+        const sink = SinkFunc((frame) => {
+          recorder.writeFrame(frame);
+        });
+        call.receive(sink);
         
         call.play(source);
         
@@ -199,7 +277,6 @@ async function main() {
         setTimeout(() => {
           console.log('3 seconds elapsed. Hanging up...');
           call.hangup();
-          process.exit(0);
         }, 3000);
         
       } catch (err) {
@@ -209,9 +286,22 @@ async function main() {
       }
     });
     
-    call.onEnd((reason) => {
+    call.onEnd(async (reason) => {
       console.log('Call ended:', reason);
-      process.exit(0);
+      
+      try {
+        const savedFile = await recorder.save();
+        
+        // Send recording via Telegram if available
+        // For now, just log the file path
+        console.log(`Recording saved: ${savedFile}`);
+        console.log('You can find the recording in the recordings/ directory');
+        
+        process.exit(0);
+      } catch (err) {
+        console.error('Failed to save recording:', err.message);
+        process.exit(1);
+      }
     });
     
   } catch (err) {
