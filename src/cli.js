@@ -194,19 +194,31 @@ async function main() {
   
   // Wait for connection
   let qrPrinted = false;
-  await new Promise((resolve) => {
+  let connectionResolved = false;
+  await new Promise((resolve, reject) => {
     const checkConnection = setInterval(() => {
-      if (wa.user?.id) {
+      if (wa.user?.id && !connectionResolved) {
+        connectionResolved = true;
         clearInterval(checkConnection);
         resolve();
       }
     }, 500);
     
+    // Timeout after 2 minutes
+    const timeout = setTimeout(() => {
+      if (!connectionResolved) {
+        connectionResolved = true;
+        clearInterval(checkConnection);
+        reject(new Error('Connection timeout - QR code not scanned within 2 minutes'));
+      }
+    }, 120000);
+    
     const handleConnectionUpdate = async ({ connection, lastDisconnect, qr }) => {
       if (qr && !qrPrinted) {
         qrPrinted = true;
         console.log('\n=== SCAN THIS QR CODE WITH WHATSAPP ===');
-        console.log('Settings → Linked Devices → Link a Device\n');
+        console.log('Settings → Linked Devices → Link a Device');
+        console.log('If it says "check internet connection", ensure your phone has internet\n');
         const qrcode = await import('qrcode-terminal');
         qrcode.default.generate(qr, { small: true }, (qrCode) => {
           console.log(qrCode);
@@ -216,7 +228,15 @@ async function main() {
       if (connection === 'close') {
         const shouldReconnect = lastDisconnect?.error?.output?.statusCode !== DisconnectReason.loggedOut;
         if (shouldReconnect) {
-          logger.info('reconnecting...');
+          logger.info('Connection lost, reconnecting...');
+          // Don't resolve yet, wait for reconnection
+        } else {
+          if (!connectionResolved) {
+            connectionResolved = true;
+            clearInterval(checkConnection);
+            clearTimeout(timeout);
+            reject(new Error('Logged out - please delete auth_info folder and try again'));
+          }
         }
       }
       if (connection === 'open') {
@@ -229,8 +249,28 @@ async function main() {
   
   console.log('Connected to WhatsApp. Placing call...');
   
+  // Retry call placement up to 3 times
+  let call = null;
+  let callAttempts = 0;
+  const maxCallAttempts = 3;
+  
+  async function placeCall() {
+    callAttempts++;
+    try {
+      call = await meow.call({}, phone);
+      return call;
+    } catch (err) {
+      if (callAttempts < maxCallAttempts) {
+        console.log(`Call attempt ${callAttempts} failed: ${err.message}. Retrying in 3s...`);
+        await new Promise(r => setTimeout(r, 3000));
+        return placeCall();
+      }
+      throw err;
+    }
+  }
+  
   try {
-    const call = await meow.call({}, phone);
+    call = await placeCall();
     
     // Set up recording
     const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
