@@ -322,21 +322,33 @@ async function main() {
   }
   
   try {
-    call = await placeCall();
+      call = await placeCall();
+      console.log('Call object created:', !!call);
     
-    // Set up recording
-    const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
-    const safePhone = phone.replace('+', '').replace(/\s+/g, '');
-    const recordingFile = `recordings/call_${safePhone}_${timestamp}.wav`;
+      // Set up recording
+      const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
+      const safePhone = phone.replace('+', '').replace(/\\s+/g, '');
+      const recordingFile = `recordings/call_${safePhone}_${timestamp}.wav`;
     
-    // Ensure recordings directory exists
-    const { mkdir } = await import('node:fs/promises');
-    await mkdir('recordings', { recursive: true });
+      // Ensure recordings directory exists
+      const { mkdir } = await import('node:fs/promises');
+      await mkdir('recordings', { recursive: true });
     
-    const recorder = new WAVRecorder(recordingFile);
+      const recorder = new WAVRecorder(recordingFile);
     
-    call.onReady(async () => {
-      console.log('Call connected! Playing message...');
+      call.onStateChange((state) => {
+            console.log('Call state:', state);
+          });
+    
+          // Add timeout for call to be answered
+          const callTimeout = setTimeout(() => {
+            console.log('Call timeout - no answer after 30s');
+            call.hangup();
+          }, 30000);
+    
+          call.onReady(async () => {
+            clearTimeout(callTimeout);
+            console.log('✅ Call connected! Playing message...');
       
       try {
         const pcmBuffer = await textToSpeechBuffer(message);
@@ -379,6 +391,7 @@ async function main() {
     });
     
     call.onEnd(async (reason) => {
+      clearTimeout(callTimeout);
       console.log('Call ended:', reason);
       
       try {
