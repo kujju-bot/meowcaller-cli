@@ -204,24 +204,9 @@ async function main() {
   
   wa.ev.on('creds.update', saveCreds);
   
-  // If using pair code, request it
-  if (usePairCode) {
-    const cleanPhone = phone.replace('+', '');
-    console.log(`Requesting pairing code for ${cleanPhone}...`);
-    try {
-      const code = await wa.requestPairingCode(cleanPhone);
-      console.log('\n=== PAIRING CODE ===');
-      console.log(`Your pairing code: ${code}`);
-      console.log('Enter this code in WhatsApp: Settings → Linked Devices → Link a Device → "Link with phone number"');
-      console.log('=== END PAIRING CODE ===\n');
-    } catch (err) {
-      console.error('Failed to request pairing code:', err.message);
-      process.exit(1);
-    }
-  }
-  
-  // Wait for connection
+  // Wait for connection first (socket fully open), then request pairing code if needed
   let qrPrinted = false;
+  let socketOpen = false;
   let connectionResolved = false;
   let isPostPairing = false;
   let timeoutHandle = null;
@@ -234,75 +219,97 @@ async function main() {
         clearInterval(checkConnection);
         reject(new Error('Connection timeout'));
       }
-    }, isPostPairing ? 60000 : 120000); // Longer timeout during post-pairing
+    }, isPostPairing ? 60000 : 120000);
   }
   
-  await new Promise((resolve, reject) => {
-    const checkConnection = setInterval(() => {
-      if (wa.user?.id && !connectionResolved && !isPostPairing) {
-        connectionResolved = true;
-        clearInterval(checkConnection);
-        if (timeoutHandle) clearTimeout(timeoutHandle);
-        resolve();
-      }
-    }, 500);
-    
-    startTimeout();
-    
-    const handleConnectionUpdate = async ({ connection, lastDisconnect, qr }) => {
-      // Only show QR if not using pair code
-      if (qr && !qrPrinted && !usePairCode) {
-        qrPrinted = true;
-        console.log('\n=== SCAN THIS QR CODE WITH WHATSAPP ===');
-        console.log('Settings → Linked Devices → Link a Device');
-        console.log('If it says "check internet connection", ensure your phone has internet\n');
-        const qrcode = await import('qrcode-terminal');
-        qrcode.default.generate(qr, { small: true }, (qrCode) => {
-          console.log(qrCode);
-          console.log('=== END QR CODE ===\n');
-        });
-        // QR shown, reset timeout for pairing phase
-        startTimeout();
-      }
-      if (connection === 'close') {
-        const errorCode = lastDisconnect?.error?.output?.statusCode;
-        const isLoggedOut = errorCode === DisconnectReason.loggedOut;
-        const isStreamError = errorCode === 515; // Stream error after pairing
-        
-        if (isLoggedOut) {
-          if (!connectionResolved) {
-            connectionResolved = true;
-            clearInterval(checkConnection);
-            if (timeoutHandle) clearTimeout(timeoutHandle);
-            reject(new Error('Logged out - please delete auth_info folder and try again'));
+  // First, wait for socket to fully open
+  console.log('Waiting for socket to open...');
+  await wa.waitForSocketOpen();
+  console.log('✅ Socket fully opened!');
+  socketOpen = true;
+  
+  // Now request pairing code if needed (after socket is fully open)
+  if (usePairCode) {
+    const cleanPhone = phone.replace('+', '');
+    console.log(`Requesting pairing code for ${cleanPhone}...`);
+    try {
+      const code = await wa.requestPairingCode(cleanPhone);
+      console.log('\n=== PAIRING CODE ===');
+      console.log(`Your pairing code: ${code}`);
+      console.log('Enter this code in WhatsApp: Settings → Linked Devices → Link a Device → "Link with phone number"');
+      console.log('=== END PAIRING CODE ===\n');
+      
+      // Wait for pairing to complete (full login)
+      console.log('Waiting for pairing to complete...');
+      await wa.waitForConnectionUpdate(({ connection }) => connection === 'open' && wa.user?.id);
+      console.log('✅ Successfully paired! User ID:', wa.user.id);
+    } catch (err) {
+      console.error('Failed to request pairing code:', err.message);
+      process.exit(1);
+    }
+  } else {
+    // For QR code: wait for connection with QR handling
+    await new Promise((resolve, reject) => {
+      const checkConnection = setInterval(() => {
+        if (wa.user?.id && !connectionResolved && !isPostPairing) {
+          connectionResolved = true;
+          clearInterval(checkConnection);
+          if (timeoutHandle) clearTimeout(timeoutHandle);
+          resolve();
+        }
+      }, 500);
+      
+      startTimeout();
+      
+      const handleConnectionUpdate = async ({ connection, lastDisconnect, qr }) => {
+        // Only show QR if not using pair code
+        if (qr && !qrPrinted && !usePairCode) {
+          qrPrinted = true;
+          console.log('\n=== SCAN THIS QR CODE WITH WHATSAPP ===');
+          console.log('Settings → Linked Devices → Link a Device');
+          console.log('If it says "check internet connection", ensure your phone has internet\n');
+          const qrcode = await import('qrcode-terminal');
+          qrcode.default.generate(qr, { small: true }, (qrCode) => {
+            console.log(qrCode);
+            console.log('=== END QR CODE ===\n');
+          });
+          startTimeout();
+        }
+        if (connection === 'close') {
+          const errorCode = lastDisconnect?.error?.output?.statusCode;
+          const isLoggedOut = errorCode === DisconnectReason.loggedOut;
+          const isStreamError = errorCode === 515;
+          
+          if (isLoggedOut) {
+            if (!connectionResolved) {
+              connectionResolved = true;
+              clearInterval(checkConnection);
+              if (timeoutHandle) clearTimeout(timeoutHandle);
+              reject(new Error('Logged out - please delete auth_info folder and try again'));
+            }
+          } else if (isStreamError && qrPrinted) {
+            console.log('Post-pairing restart... waiting for reconnection');
+            isPostPairing = true;
+            startTimeout();
+            setTimeout(() => { isPostPairing = false; }, 5000);
+          } else {
+            console.log('Connection lost, reconnecting...');
           }
-        } else if (isStreamError && qrPrinted) {
-          // Post-pairing stream error - this is expected, wait for reconnection
-          console.log('Post-pairing restart... waiting for reconnection');
-          isPostPairing = true;
-          startTimeout(); // Extended timeout for reconnection
-          // Give it time to reconnect
-          setTimeout(() => {
-            isPostPairing = false;
-          }, 5000);
-        } else {
-          console.log('Connection lost, reconnecting...');
         }
-      }
-      if (connection === 'open') {
-        logger.info('WhatsApp connected!');
-        if (isPostPairing) {
-          // Wait a bit more after post-pairing reconnection
-          setTimeout(() => {
-            isPostPairing = false;
-            startTimeout(); // Reset timeout after reconnection
-          }, 3000);
+        if (connection === 'open') {
+          logger.info('WhatsApp connected!');
+          if (isPostPairing) {
+            setTimeout(() => { 
+              isPostPairing = false;
+              startTimeout();
+            }, 3000);
+          }
         }
-      }
-    };
-    
-    wa.ev.on('connection.update', handleConnectionUpdate);
-  });
+      };
+      
+      wa.ev.on('connection.update', handleConnectionUpdate);
+    });
+  }
   
   console.log('Connected to WhatsApp. Placing call...');
   
