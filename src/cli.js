@@ -182,16 +182,7 @@ class WAVRecorder {
   }
 }
 
-async function main() {
-  const { phone, message, usePairCode } = parseArgs();
-  
-  console.log(`Starting meowcaller-cli...`);
-  console.log(`Target: ${phone}`);
-  console.log(`Message: "${message}"`);
-  if (usePairCode) {
-    console.log(`Using phone number pairing...`);
-  }
-  
+async function connect(phone, usePairCode) {
   const { state, saveCreds } = await useMultiFileAuthState('auth_info');
   
   const wa = makeWASocket({
@@ -253,10 +244,13 @@ async function main() {
       if (isLoggedOut) {
         console.log('Logged out - please delete auth_info folder and try again');
         process.exit(1);
-      } else if (isStreamError && qrPrinted) {
-        console.log('Post-pairing restart... waiting for reconnection');
+      } else if (isStreamError) {
+        console.log('Stream error (515) - reconnecting...');
+        // Recursively reconnect like whatai does
+        await connect(phone, usePairCode);
       } else {
         console.log('Connection lost, reconnecting...');
+        await connect(phone, usePairCode);
       }
     } else if (connection === 'open') {
       if (wa.user?.id) {
@@ -290,6 +284,21 @@ async function main() {
   }
   
   console.log('Connected to WhatsApp. Placing call...');
+  
+  return { wa, meow };
+}
+
+async function main() {
+  const { phone, message, usePairCode } = parseArgs();
+  
+  console.log(`Starting meowcaller-cli...`);
+  console.log(`Target: ${phone}`);
+  console.log(`Message: "${message}"`);
+  if (usePairCode) {
+    console.log(`Using phone number pairing...`);
+  }
+  
+  const { wa, meow } = await connect(phone, usePairCode);
   
   // Retry call placement up to 3 times
   let call = null;
