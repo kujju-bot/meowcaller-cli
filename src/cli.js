@@ -301,6 +301,17 @@ async function main() {
   
   const { wa, meow } = await connect(phone, usePairCode);
   
+  // Check if number is on WhatsApp
+  console.log('Checking if number is on WhatsApp...');
+  const onWhatsApp = await wa.onWhatsApp(phone);
+  console.log('onWhatsApp result:', onWhatsApp);
+  
+  if (!onWhatsApp || onWhatsApp.length === 0 || !onWhatsApp[0].exists) {
+    console.error('Number is not registered on WhatsApp!');
+    process.exit(1);
+  }
+  console.log('Number exists on WhatsApp:', onWhatsApp[0].jid);
+  
   // Retry call placement up to 3 times
   let call = null;
   let callAttempts = 0;
@@ -340,7 +351,26 @@ async function main() {
             console.log('Call state:', state);
           });
     
-          // Add timeout for call to be answered
+          // Log call events
+          call.onEnd((reason) => {
+            console.log('Call ended:', reason);
+          });
+    
+          // Check call object internals
+                    console.log('Call ID:', call.id());
+                    console.log('Call peer:', call.peer());
+          
+                    // Check if wa has sendNode
+                              console.log('wa.sendNode:', typeof wa.sendNode);
+                              console.log('wa.ws:', !!wa.ws);
+                              console.log('wa.ws.isOpen:', wa.ws?.isOpen);
+          
+                              // Add call event listener to debug
+                              wa.ev.on('call', ([ev]) => {
+                                console.log('CALL EVENT:', JSON.stringify(ev, null, 2));
+                              });
+          
+                              // Add timeout for call to be answered
           const callTimeout = setTimeout(() => {
             console.log('Call timeout - no answer after 30s');
             call.hangup();
