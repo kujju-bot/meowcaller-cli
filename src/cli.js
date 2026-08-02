@@ -195,9 +195,10 @@ async function main() {
   // Wait for connection
   let qrPrinted = false;
   let connectionResolved = false;
+  let isPostPairing = false;
   await new Promise((resolve, reject) => {
     const checkConnection = setInterval(() => {
-      if (wa.user?.id && !connectionResolved) {
+      if (wa.user?.id && !connectionResolved && !isPostPairing) {
         connectionResolved = true;
         clearInterval(checkConnection);
         resolve();
@@ -226,21 +227,37 @@ async function main() {
         });
       }
       if (connection === 'close') {
-        const shouldReconnect = lastDisconnect?.error?.output?.statusCode !== DisconnectReason.loggedOut;
-        if (shouldReconnect) {
-          logger.info('Connection lost, reconnecting...');
-          // Don't resolve yet, wait for reconnection
-        } else {
+        const errorCode = lastDisconnect?.error?.output?.statusCode;
+        const isLoggedOut = errorCode === DisconnectReason.loggedOut;
+        const isStreamError = errorCode === 515; // Stream error after pairing
+        
+        if (isLoggedOut) {
           if (!connectionResolved) {
             connectionResolved = true;
             clearInterval(checkConnection);
             clearTimeout(timeout);
             reject(new Error('Logged out - please delete auth_info folder and try again'));
           }
+        } else if (isStreamError && qrPrinted) {
+          // Post-pairing stream error - this is expected, wait for reconnection
+          console.log('Post-pairing restart... waiting for reconnection');
+          isPostPairing = true;
+          // Give it time to reconnect
+          setTimeout(() => {
+            isPostPairing = false;
+          }, 5000);
+        } else {
+          console.log('Connection lost, reconnecting...');
         }
       }
       if (connection === 'open') {
         logger.info('WhatsApp connected!');
+        if (isPostPairing) {
+          // Wait a bit more after post-pairing reconnection
+          setTimeout(() => {
+            isPostPairing = false;
+          }, 3000);
+        }
       }
     };
     
