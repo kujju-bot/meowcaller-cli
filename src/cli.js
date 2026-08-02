@@ -196,23 +196,30 @@ async function main() {
   let qrPrinted = false;
   let connectionResolved = false;
   let isPostPairing = false;
+  let timeoutHandle = null;
+  
+  function startTimeout() {
+    if (timeoutHandle) clearTimeout(timeoutHandle);
+    timeoutHandle = setTimeout(() => {
+      if (!connectionResolved) {
+        connectionResolved = true;
+        clearInterval(checkConnection);
+        reject(new Error('Connection timeout'));
+      }
+    }, isPostPairing ? 60000 : 120000); // Longer timeout during post-pairing
+  }
+  
   await new Promise((resolve, reject) => {
     const checkConnection = setInterval(() => {
       if (wa.user?.id && !connectionResolved && !isPostPairing) {
         connectionResolved = true;
         clearInterval(checkConnection);
+        if (timeoutHandle) clearTimeout(timeoutHandle);
         resolve();
       }
     }, 500);
     
-    // Timeout after 2 minutes
-    const timeout = setTimeout(() => {
-      if (!connectionResolved) {
-        connectionResolved = true;
-        clearInterval(checkConnection);
-        reject(new Error('Connection timeout - QR code not scanned within 2 minutes'));
-      }
-    }, 120000);
+    startTimeout();
     
     const handleConnectionUpdate = async ({ connection, lastDisconnect, qr }) => {
       if (qr && !qrPrinted) {
@@ -225,6 +232,8 @@ async function main() {
           console.log(qrCode);
           console.log('=== END QR CODE ===\n');
         });
+        // QR shown, reset timeout for pairing phase
+        startTimeout();
       }
       if (connection === 'close') {
         const errorCode = lastDisconnect?.error?.output?.statusCode;
@@ -235,13 +244,14 @@ async function main() {
           if (!connectionResolved) {
             connectionResolved = true;
             clearInterval(checkConnection);
-            clearTimeout(timeout);
+            if (timeoutHandle) clearTimeout(timeoutHandle);
             reject(new Error('Logged out - please delete auth_info folder and try again'));
           }
         } else if (isStreamError && qrPrinted) {
           // Post-pairing stream error - this is expected, wait for reconnection
           console.log('Post-pairing restart... waiting for reconnection');
           isPostPairing = true;
+          startTimeout(); // Extended timeout for reconnection
           // Give it time to reconnect
           setTimeout(() => {
             isPostPairing = false;
@@ -256,6 +266,7 @@ async function main() {
           // Wait a bit more after post-pairing reconnection
           setTimeout(() => {
             isPostPairing = false;
+            startTimeout(); // Reset timeout after reconnection
           }, 3000);
         }
       }
