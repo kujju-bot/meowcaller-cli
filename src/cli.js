@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 
-import { makeWASocket, useMultiFileAuthState, DisconnectReason } from '@whiskeysockets/baileys';
+import { makeWASocket, useMultiFileAuthState, DisconnectReason, Browsers } from '@whiskeysockets/baileys';
 import { Client, SourceFunc, SinkFunc, FrameSamples, SampleRate } from 'meowcaller-js';
 import pino from 'pino';
 import { spawn } from 'node:child_process';
@@ -188,6 +188,7 @@ async function connect(phone, usePairCode) {
   const wa = makeWASocket({
     auth: state,
     logger: pino({ level: 'silent' }),
+    browser: Browsers.macOS('Chrome'),
   });
   
   const meow = new Client(wa, { logger: pino({ level: 'silent' }) });
