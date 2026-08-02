@@ -121,29 +121,17 @@ async function main() {
   const { state, saveCreds } = await useMultiFileAuthState('auth_info');
   
   const wa = makeWASocket({
-    auth: state,
-    logger,
-    printQRInTerminal: true,
-  });
-  
-  const meow = new Client(wa, { logger });
-  meow.connect();
-  
-  wa.ev.on('creds.update', saveCreds);
-  
-  wa.ev.on('connection.update', ({ connection, lastDisconnect }) => {
-    if (connection === 'close') {
-      const shouldReconnect = lastDisconnect?.error?.output?.statusCode !== DisconnectReason.loggedOut;
-      if (shouldReconnect) {
-        logger.info('reconnecting...');
-      }
-    }
-    if (connection === 'open') {
-      logger.info('WhatsApp connected!');
-    }
-  });
-  
-  // Wait for connection
+      auth: state,
+      logger,
+    });
+
+    const meow = new Client(wa, { logger });
+    meow.connect();
+
+    wa.ev.on('creds.update', saveCreds);
+
+    // Wait for connection
+  let qrPrinted = false;
   await new Promise((resolve) => {
     const checkConnection = setInterval(() => {
       if (wa.user?.id) {
@@ -151,6 +139,31 @@ async function main() {
         resolve();
       }
     }, 500);
+    
+    // Handle QR in connection.update event
+    const handleConnectionUpdate = async ({ connection, lastDisconnect, qr }) => {
+      if (qr && !qrPrinted) {
+        qrPrinted = true;
+        console.log('\n=== SCAN THIS QR CODE WITH WHATSAPP ===');
+        console.log('Settings → Linked Devices → Link a Device\n');
+        const qrcode = await import('qrcode-terminal');
+        qrcode.default.generate(qr, { small: true }, (qrCode) => {
+          console.log(qrCode);
+          console.log('=== END QR CODE ===\n');
+        });
+      }
+      if (connection === 'close') {
+        const shouldReconnect = lastDisconnect?.error?.output?.statusCode !== DisconnectReason.loggedOut;
+        if (shouldReconnect) {
+          logger.info('reconnecting...');
+        }
+      }
+      if (connection === 'open') {
+        logger.info('WhatsApp connected!');
+      }
+    };
+    
+    wa.ev.on('connection.update', handleConnectionUpdate);
   });
   
   console.log('Connected to WhatsApp. Placing call...');
